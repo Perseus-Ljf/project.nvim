@@ -1,237 +1,69 @@
----@module 'project._meta'
-
-local uv = vim.uv or vim.loop
-local MODSTR = 'project.config'
-local Extensions = require('project.extensions')
+local Defaults = require('project.config.defaults')
 local Util = require('project.util')
 
-local float = nil ---@type nil|Project.ConfigLoc
-
----Get the default options for configuring `project`.
---- ---
----@return ProjectDefaults defaults
----@nodiscard
-local function get_defaults()
-  return require('project.config.defaults')
-end
-
----@class Project.Config
----@field custom_projects ProjectConfigHistoryEntry[]
----@field defaults ProjectDefaults
----@field options ProjectDefaults
 local M = {}
 
-M.options = get_defaults():new()
+M.options = vim.deepcopy(Defaults)
 
----The function called when running `require('project').setup()`.
---- ---
----@param options? ProjectOpts The `project.nvim` config options.
+local function merge_options(options)
+  options = options or {}
+  Util.validate({ options = { options, { 'table' } } })
+
+  local merged = vim.tbl_deep_extend('force', vim.deepcopy(Defaults), options)
+  if options.patterns ~= nil then
+    merged.patterns = options.patterns
+  end
+  if options.exclude_dirs ~= nil then
+    merged.exclude_dirs = options.exclude_dirs
+  end
+  if options.disable_on and options.disable_on.ft ~= nil then
+    merged.disable_on.ft = options.disable_on.ft
+  end
+  if options.disable_on and options.disable_on.bt ~= nil then
+    merged.disable_on.bt = options.disable_on.bt
+  end
+
+  if type(merged.patterns) ~= 'table' or vim.tbl_isempty(merged.patterns) then
+    merged.patterns = vim.deepcopy(Defaults.patterns)
+  end
+
+  local patterns = {}
+  for _, pattern in ipairs(merged.patterns) do
+    if type(pattern) == 'string' and pattern ~= '' and not vim.list_contains(patterns, pattern) then
+      table.insert(patterns, pattern)
+    end
+  end
+  merged.patterns = vim.tbl_isempty(patterns) and vim.deepcopy(Defaults.patterns) or patterns
+
+  if type(merged.exclude_dirs) ~= 'table' then
+    merged.exclude_dirs = {}
+  end
+  merged.exclude_dirs = vim.tbl_map(function(pattern)
+    return require('project.util.globtopattern').pattern_exclude(pattern)
+  end, merged.exclude_dirs)
+
+  if not vim.list_contains({ 'global', 'tab', 'win' }, merged.scope_chdir) then
+    merged.scope_chdir = Defaults.scope_chdir
+  end
+
+  merged.manual_mode = merged.manual_mode == true
+  merged.silent_chdir = merged.silent_chdir ~= false
+  merged.enable_autochdir = merged.enable_autochdir == true
+  merged.disable_on = vim.tbl_deep_extend('force', vim.deepcopy(Defaults.disable_on), merged.disable_on or {})
+
+  return merged
+end
+
 function M.setup(options)
-  Util.validate({ options = { options, { 'table', 'nil' }, true } })
-
-  local pattern_exclude = Util.globtopattern.pattern_exclude
-  M.options = get_defaults():new(options or {})
-
-  M.detection_methods = M.options:gen_methods()
-  M.options:expand_excluded()
-  M.options.exclude_dirs = vim.tbl_map(pattern_exclude, M.options.exclude_dirs)
-
-  M.options:verify()
-
-  ---CREDITS: https://github.com/ahmedkhalf/project.nvim/pull/111
+  M.options = merge_options(options)
   vim.o.autochdir = M.options.enable_autochdir
-
-  -- WARN: THIS GOES FIRST!!!!
-  if vim.fn.mkdir(M.options.history.save_dir, 'p') ~= 1 and not Util.path.exists(M.options.history.save_dir) then
-    M.options.history.save_dir = get_defaults():new():_get_no_mt().history.save_dir
-    if vim.fn.mkdir(M.options.history.save_dir, 'p') ~= 1 and not Util.path.exists(M.options.history.save_dir) then
-      error('(%s.setup): Unable to create history directory!')
-    end
-  end
-
-  Util.path.datapath = M.options.history.save_dir
-  Util.path.projectpath = Util.path.join(M.options.history.save_dir, 'project_nvim')
-  if not Util.path.exists(Util.path.projectpath) and vim.fn.mkdir(Util.path.projectpath, 'p') ~= 1 then
-    error('(%s.setup): Unable to create history subdirectory!')
-  end
-
-  Util.path.historyfile = Util.path.join(Util.path.projectpath, M.options.history.save_file)
-  if not Util.path.exists(Util.path.historyfile) then
-    local fd = uv.fs_open(Util.path.historyfile, 'w', Util.path.open_mode('644'))
-    if not fd then
-      error('(%s.setup): Unable to create history file!')
-    end
-
-    uv.fs_write(fd, '[]')
-    uv.fs_close(fd)
-  end
-
-  if not (Util.path.datapath and Util.path.projectpath and Util.path.historyfile) then
-    error(('(%s.setup): Failed to store history path successfully!'):format(MODSTR))
-  end
-
-  if M.options.log.enabled then
-    Util.log.setup()
-    Util.log.debug(('(%s.setup): Initialized logging.'):format(MODSTR))
-  end
-
-  if vim.g.project_setup ~= 1 then
-    vim.g.project_setup = 1
-    Util.log.debug(('(%s.setup): `g:project_setup` set to `1`.'):format(MODSTR))
-  end
-
-  require('project.commands').setup()
-  Util.log.debug(('(%s.setup): User commands created.'):format(MODSTR))
+  vim.g.project_setup = 1
 
   require('project.core').setup()
-
-  if M.options.fzf_lua.enabled then
-    Util.log.debug(('(%s.setup): fzf-lua integration enabled.'):format(MODSTR))
-    Extensions['fzf-lua'].setup()
-  end
-  if M.options.picker.enabled then
-    Util.log.debug(('(%s.setup): picker.nvim integration enabled.'):format(MODSTR))
-    Extensions.picker.setup()
-  end
-  if M.options.snacks.enabled then
-    Util.log.debug(('(%s.setup): snacks.nvim integration enabled.'):format(MODSTR))
-    Extensions.snacks.setup(M.options.snacks.opts or {})
-  end
-
-  M.custom_projects = vim.deepcopy(M.options.custom_projects or {})
-
-  local group = vim.api.nvim_create_augroup('project.nvim-attach', { clear = true })
-  if M.options.before_attach and vim.is_callable(M.options.before_attach) then
-    vim.api.nvim_create_autocmd('User', {
-      pattern = 'ProjectAttachPre',
-      group = group,
-      callback = function(ev)
-        M.options.before_attach(ev.data.dir, ev.data.method)
-        Util.log.debug(('(%s.setup): Ran `before_attach` hook successfully.'):format(MODSTR))
-      end,
-    })
-  end
-  if M.options.on_attach and vim.is_callable(M.options.on_attach) then
-    vim.api.nvim_create_autocmd('User', {
-      pattern = 'ProjectAttachPost',
-      group = group,
-      callback = function(ev)
-        M.options.on_attach(ev.data.dir, ev.data.method)
-        Util.log.debug(('(%s.setup): Ran `on_attach` hook successfully.'):format(MODSTR))
-      end,
-    })
-  end
 end
 
----@return string config
----@nodiscard
 function M.get_config()
-  if vim.g.project_setup ~= 1 then
-    Util.log.error(('(%s.get_config): `project.nvim` is not set up!'):format(MODSTR))
-    error(('(%s.get_config): `project.nvim` is not set up!'):format(MODSTR))
-  end
-  local exceptions = {
-    'expand_excluded',
-    'gen_methods',
-    'new',
-    'verify',
-    'verify_datapath',
-    'verify_fzf_lua',
-    'verify_history',
-    'verify_lists',
-    'verify_logging',
-    'verify_lsp',
-    'verify_owners',
-    'verify_scope_chdir',
-  }
-  local opts = {} ---@type ProjectOpts
-  for k, v in pairs(M.options) do
-    if not vim.list_contains(exceptions, k) then
-      opts[k] = v
-    end
-  end
-  return vim.inspect(opts)
+  return vim.inspect(M.options)
 end
 
-function M.open_win()
-  if float then
-    return
-  end
-
-  local bufnr = vim.api.nvim_create_buf(false, true)
-  local height = math.floor(vim.o.lines * 0.85)
-  local width = math.floor(vim.o.columns * 0.85)
-  local title = 'project.nvim'
-  local current_config = ('%s%s\n%s\n%s'):format(
-    (' '):rep(math.floor((width - title:len()) / 2)),
-    title,
-    ('='):rep(width),
-    M.get_config()
-  )
-  vim.api.nvim_buf_set_lines(bufnr, 0, -1, true, vim.split(current_config, '\n', { plain = true }))
-
-  if vim.fn.mode() ~= 'n' then
-    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<Esc>', true, false, true), 'i', false)
-  end
-
-  local win = vim.api.nvim_open_win(bufnr, true, {
-    focusable = true,
-    border = 'rounded',
-    col = math.floor((vim.o.columns - width) / 2) - 1,
-    row = math.floor((vim.o.lines - height) / 2) - 1,
-    relative = 'editor',
-    style = 'minimal',
-    title = 'Project Config',
-    title_pos = 'center',
-    width = width,
-    height = height,
-    zindex = 30,
-  })
-
-  Util.optset('signcolumn', 'no', 'win', win)
-  Util.optset('list', false, 'win', win)
-  Util.optset('number', false, 'win', win)
-  Util.optset('wrap', false, 'win', win)
-  Util.optset('colorcolumn', '', 'win', win)
-  Util.optset('filetype', '', 'buf', bufnr)
-  Util.optset('fileencoding', 'utf-8', 'buf', bufnr)
-  Util.optset('buftype', 'nowrite', 'buf', bufnr)
-  Util.optset('modifiable', false, 'buf', bufnr)
-
-  vim.keymap.set('n', 'q', M.close_win, { buffer = bufnr })
-  vim.keymap.set('n', '<Esc>', M.close_win, { buffer = bufnr })
-
-  float = { bufnr = bufnr, win = win }
-end
-
-function M.close_win()
-  if not float then
-    return
-  end
-
-  pcall(vim.api.nvim_buf_delete, float.bufnr, { force = true })
-  pcall(vim.api.nvim_win_close, float.win, true)
-
-  float = nil
-end
-
-function M.toggle_win()
-  if not float then
-    M.open_win()
-    return
-  end
-
-  M.close_win()
-end
-
-local Config = setmetatable(M, { ---@type Project.Config
-  __index = function(self, k)
-    if Util.mod_exists('project.config.' .. k) then
-      return require('project.config.' .. k)
-    end
-    return rawget(self, k) or nil
-  end,
-})
-
-return Config
--- vim: set ts=2 sts=2 sw=2 et ai si sta:
+return M

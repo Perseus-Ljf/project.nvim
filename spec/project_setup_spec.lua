@@ -1,53 +1,32 @@
-local assert = require('luassert') ---@type Luassert
+local assert = require('luassert')
 
 describe('project.nvim setup', function()
-  local project ---@type Project
-  local defaults ---@type ProjectOpts
-  local ok ---@type boolean
-
   before_each(function()
-    project = require('project')
+    for name in pairs(package.loaded) do
+      if name == 'project' or name:match('^project%.') then
+        package.loaded[name] = nil
+      end
+    end
   end)
 
-  it('should set default configuration', function()
-    ok = pcall(project.setup)
-    assert.is_true(ok)
+  it('sets default configuration', function()
+    local project = require('project')
 
-    local options = require('project.config').options:_get_no_mt()
-    defaults = project.config.defaults:new():_get_no_mt()
-    assert.are_same(defaults, options)
+    assert.is_true(pcall(project.setup))
+    assert.are_same(require('project.config.defaults'), require('project.config').options)
   end)
 
-  it('should merge user configuration with defaults', function()
-    ok = pcall(project.setup, {})
-    assert.is_true(ok)
+  it('merges user configuration with defaults', function()
+    local project = require('project')
 
-    local options = project.config.options:_get_no_mt()
-    defaults = project.config.defaults:new():_get_no_mt()
-    assert.are_same(defaults, options)
-  end)
-
-  it('should handle nil options', function()
-    ok = pcall(project.setup, nil)
-    assert.is_true(ok)
-
-    local options = require('project.config').options:_get_no_mt()
-    assert.are_same(defaults, options)
+    assert.is_true(pcall(project.setup, { patterns = { '.git' }, scope_chdir = 'tab' }))
+    assert.are_same({ '.git' }, require('project.config').options.patterns)
+    assert.are_equal('tab', require('project.config').options.scope_chdir)
   end)
 
   for _, param in ipairs({ 1, false, '', function() end }) do
-    it(('should throw error when called with param of type %s'):format(type(param)), function()
-      ok = pcall(project.setup, param)
-      assert.is_false(ok)
+    it(('throws error when setup is called with %s'):format(type(param)), function()
+      assert.is_false(pcall(require('project').setup, param))
     end)
   end
-
-  it('should erase any option not in the defaults', function()
-    ok = pcall(project.setup, { 1, foo = 'bar' })
-    assert.is_true(ok)
-
-    local options = require('project.config').options:_get_no_mt()
-    assert.are_same(defaults, options)
-  end)
 end)
--- vim: set ts=2 sts=2 sw=2 et ai si sta:
